@@ -235,59 +235,57 @@ producing large gradients and therefore large writes.
 
 \section{The same question, asked of a deployed forecaster}
 
-The result above concerns a memory that updates at test time. It is natural to
-ask whether distributed storage is peculiar to that setting or general. We
-therefore applied the identical causal protocol to \textbf{Chronos-Bolt}
-\citep{ansari2024chronos}, a deployed time-series foundation model, replacing
-recall cosine with a forecasting metric.
+Does distributed storage require a memory that updates at test time? We applied the
+identical causal protocol to \textbf{Chronos-Bolt} \citep{ansari2024chronos}, a deployed
+time-series foundation model, across its full size ladder ($9$M--$205$M parameters,
+$8192$--$73728$ FFN features), replacing recall cosine with Weighted Quantile Loss.
 
-Chronos-Bolt is a T5 encoder-decoder that patches the context and regresses nine
-quantiles directly; it carries no token vocabulary, so weight-space lenses do not
-apply, but ablation does. We zero one FFN feature (row $j$ of $W_{\text{in}}$,
-column $j$ of $W_{\text{out}}$), re-forecast, and measure Weighted Quantile Loss
-(WQL) on held-out windows. The \texttt{tiny} checkpoint has $8$ FFN layers
-$\times\,1024$ features $=8192$ features.
+Chronos-Bolt is a T5 encoder-decoder that patches the context and regresses nine quantiles
+directly; it has no token vocabulary, so weight-space lenses do not apply, but ablation
+does. We zero one FFN feature (row $j$ of $W_{\text{in}}$, column $j$ of $W_{\text{out}}$),
+re-forecast, and measure WQL on held-out windows.
 
-\paragraph{Controls.} On ETTh1 (56 windows, context 512, horizon 64) the model
-scores WQL $0.939$ against $2.055$ for a last-value baseline, so it is genuinely
-forecasting. Zeroing \emph{all} FFN features raises WQL to $22.65$
-($+2312\%$)---the ablation is not a no-op.
+\paragraph{Controls.} On ETTh1 (56 windows, context 512, horizon 64) the smallest model
+scores WQL $0.939$ against $2.055$ for a last-value baseline. Zeroing \emph{all} FFN
+features raises WQL to $22.65$; the control passes for every model on every dataset.
+
+\paragraph{No single feature matters, and this strengthens with scale.} Ablating features
+individually (exhaustively at $8192$; $2000$ sampled at larger sizes), the largest effect
+any one feature had on WQL \emph{falls monotonically with model size}: $+0.29\%$, $+0.23\%$,
+$+0.20\%$, $+0.10\%$ from \texttt{tiny} to \texttt{base}. Between $22\%$ and $30\%$ of
+features \emph{improved} the forecast when removed.
+
+\paragraph{Bulk tolerance moves the other way.} Removing half the features costs $+0.3\%$
+on \texttt{tiny} but $+12.5\%$ on \texttt{base} (Table~\ref{tab:chronos}). The two trends
+are not contradictory: larger models spread function across more features, so no individual
+feature is load-bearing, while using their capacity more fully, so less can be deleted in
+bulk.
 
 \begin{table}[h]
 \centering
-\caption{Randomly removing FFN features from Chronos-Bolt (tiny). Change in WQL
-relative to the unablated model, averaged over 3 draws.}
+\caption{WQL degradation from removing half the FFN features at random (3 draws). The
+scaling trend holds on ETTh1 and ETTh2 and is absent on ETTm1, where every model forecasts
+best in absolute terms.}
 \label{tab:chronos}
 \small
-\begin{tabular}{lrrrrr}
+\begin{tabular}{lrrrr}
 \toprule
-Dataset & baseline WQL & $-25\%$ & $-50\%$ & $-75\%$ & $-100\%$ \\
+& features & ETTh1 & ETTh2 & ETTm1 \\
 \midrule
-ETTh1 & 0.939 & $-0.4\%$ & $+0.3\%$ & $+11.5\%$ & $+2312\%$ \\
-ETTm1 & 0.643 & $+3.1\%$ & $+10.9\%$ & $+241.5\%$ & $+6469\%$ \\
-ETTh2 & 1.235 & $+1.4\%$ & $-2.4\%$ & $-2.1\%$ & $+423\%$ \\
+\texttt{tiny}  &  8192 & $+0.3\%$ & $-2.4\%$ & $+10.9\%$ \\
+\texttt{mini}  & 12288 & $+0.0\%$ & $-2.1\%$ & $+7.2\%$ \\
+\texttt{small} & 24576 & $+1.8\%$ & $+7.5\%$ & $+10.2\%$ \\
+\texttt{base}  & 73728 & $+12.5\%$ & $+20.6\%$ & $+8.6\%$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-No single feature carries a measurable share of accuracy. Ablating
-\textbf{every one of the 8192 features individually}, the largest effect on WQL
-was $+0.71\%$ (encoder layer 4, feature 693); $30\%$ of features degraded the
-forecast when removed and $28\%$ \emph{improved} it, the rest falling inside
-run-to-run noise. Effect is mildly concentrated---the top $10\%$ of features
-account for $67\%$ of the total absolute effect, and the last encoder layer
-carries $2$--$4\times$ the mean effect of any other---but the absolute scale
-stays under one percent throughout. Removing any single FFN \emph{layer} moved
-WQL by between $-1.4\%$ and $+1.6\%$. Half the features can be
-removed for $+0.3\%$ on ETTh1 and $-2.4\%$ on ETTh2, though ETTm1 is stricter at
-$+10.9\%$ (Table~\ref{tab:chronos}). The FFN is thus collectively essential and
-individually near-redundant.
-
-This is the same picture the test-time memory gives---no localized storage, heavy
-distribution---now on a frozen forecaster judged by forecasting error. We report
-it as a bounded observation: one model family, the smallest checkpoint, three
-datasets from one domain, and a redundancy level that clearly depends on the
-series.
+The single-feature result matches what the test-time memory shows---storage is distributed,
+not localized---now on a frozen forecaster judged by forecasting error, and more strongly at
+scale. We bound the bulk-deletion claim: it holds on two of three datasets, uses random
+rather than targeted ablation (the conservative case), and covers one model family on one
+domain. The largest model is not systematically mis-evaluated: it has the best baseline of
+the four on ETTh2 and is within noise on ETTm1.
 
 \section{Limitations}
 

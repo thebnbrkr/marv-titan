@@ -27,7 +27,12 @@ Check the page count once compiled -- over-length is a desk reject.
 | accumulation 3.03/2.86/4.27 | extended notebook, Test A | measured, 1 seed |
 | Chronos baseline WQL 0.939 vs naive 2.055 | `chronos_ablation.py` | measured |
 | all-FFN-zeroed +2312% (positive control) | `chronos_ablation.py` | measured |
-| max single-feature effect +0.71% | exhaustive sweep, all 8192 | measured |
+| max single-feature effect, tiny | exhaustive 8192 | measured |
+| single-feature falls 0.29->0.10% across ladder | scaling sweep, 2000/model | measured |
+| 50% removal: tiny +0.3% vs base +12.5% (ETTh1) | scaling sweep, 3 seeds | measured |
+| trend holds ETTh1+ETTh2, absent ETTm1 | confound grid, 4 models x 3 datasets | measured |
+| base beats tiny on ETTh2 (1.113 vs 1.235) | confound grid | measured |
+| control passes every model x dataset | confound grid | verified |
 | 30% hurt / 28% help on removal | exhaustive sweep | measured |
 | top 10% of features = 67% of effect | exhaustive sweep | derived |
 | -25/-50/-75% group ablation table | `chronos_ablation.py`, 3 seeds | measured |
