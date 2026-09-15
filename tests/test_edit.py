@@ -1,0 +1,320 @@
+"""Edit + evaluate + describe layer: synthetic Llama-style model, no network."""
+from __future__ import annotations
+
+import numpy as np
+import pytest
+import torch
+from transformers import LlamaConfig, LlamaForCausalLM
+
+from marv.edit import ablate, restore, suppress
+from marv.evaluate import (
+    Probe,
+    diff_battery,
+    frontier_table,
+    rank_by_ablation_effect,
+    run_battery,
+    study_edit,
+    suppression_by_layer,
+    suppression_frontier,
+)
+from marv.extract import default_layer_bands, extract
+from marv.probe import build_down_meta, describe_entity, describe_feature, logit_lens, top_features
+
+
+def tiny_model():
+    config = LlamaConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=3,
+        num_attention_heads=2,
+        num_key_value_heads=2,
+        max_position_embeddings=32,
+    )
+    torch.manual_seed(0)
+    return LlamaForCausalLM(config)
+
+
+class FakeTok:
+    """Word-level tokenizer over a fixed mini vocab (ids < 64), deterministic."""
+
+    _WORDS = [
+        "<pad>", "the", "capital", "of", "France", "is", "Paris", "Germany",
+        "Berlin", "Italy", "Rome", "language", "French", "German", "weather",
+        "in", "Tokyo", "Japan", "a", "and", "to",
+    ]
+
+    def __init__(self):
+        self.i2w = {i: w for i, w in enumerate(self._WORDS)}
+        self.w2i = {w: i for i, w in enumerate(self._WORDS)}
+
+    def _tok(self, w: str) -> int:
+        if w in self.w2i:
+            return self.w2i[w]
+        return (sum(ord(c) for c in w) % 40) + 21
+
+    def encode(self, text, add_special_tokens=False):
+        return [self._tok(w) for w in text.replace("?", " ").replace(".", " ").split()]
+
+    def decode(self, ids):
+        return " ".join(self.i2w.get(int(i), f"<{int(i)}>") for i in ids)
+
+    def batch_decode(self, seqs):
+        return [self.decode(s) for s in seqs]
+
+    def __call__(self, text, return_tensors=None):
+        class _Enc(dict):
+            def to(self, device):
+                return self
+
+        return _Enc(input_ids=torch.tensor([self.encode(text)], dtype=torch.long))
+
+
+def test_default_layer_bands_cover_all_layers_contiguously():
+    for n in (2, 4, 12, 30, 32):
+        b = default_layer_bands(n)
+        assert set(b) == {"syntax", "knowledge", "output"}
+        assert b["syntax"][0] == 0
+        assert b["output"][1] == n - 1
+        # no gaps between bands (overlap tolerated for tiny models)
+        assert b["knowledge"][0] <= b["syntax"][1] + 1
+        assert b["output"][0] <= b["knowledge"][1] + 1
+        covered = set()
+        for lo, hi in b.values():
+            covered |= set(range(lo, hi + 1))
+        assert covered == set(range(n))
+
+
+def test_build_down_meta_matches_uncached_logit_lens():
+    vindex = extract(tiny_model())
+    build_down_meta(vindex, k=8)
+    assert vindex.down_meta_tokens is not None
+    for layer in range(vindex.num_layers):
+        for feat in (0, 5, 17, 31):
+            cached_ids, _ = describe_feature(vindex, layer, feat, k=5)
+            fresh_ids, _ = logit_lens(vindex, vindex.down[layer][:, feat], k=5)
+            assert list(map(int, cached_ids)) == list(map(int, fresh_ids))
+
+
+def test_suppressed_hides_feature_from_top_features():
+    vindex = extract(tiny_model())
+    query = vindex.gate[1][7]  # feature 7 matches itself best
+    assert top_features(vindex, 1, query, k=3)[0][0] == 7
+
+    vindex.suppress(1, 7)
+    hits = top_features(vindex, 1, query, k=3)
+    assert 7 not in [f for f, _ in hits]
+    assert top_features(vindex, 1, query, k=3, include_suppressed=True)[0][0] == 7
+
+
+def test_save_load_roundtrips_new_fields(tmp_path):
+    vindex = extract(tiny_model())
+    build_down_meta(vindex, k=6)
+    vindex.suppress(0, 3)
+    vindex.suppress(2, 19)
+    path = str(tmp_path / "v.npz")
+    vindex.save(path)
+
+    from marv.extract import VindexLite
+
+    loaded = VindexLite.load(path)
+    assert loaded.suppressed == {(0, 3), (2, 19)}
+    assert loaded.layer_bands == vindex.layer_bands
+    assert loaded.down_meta_tokens is not None
+    assert loaded.band("knowledge") == vindex.band("knowledge")
+    a, _ = describe_feature(loaded, 1, 4, k=5)
+    b, _ = logit_lens(loaded, loaded.down[1][:, 4], k=5)
+    assert list(map(int, a)) == list(map(int, b))
+
+
+def test_suppress_context_manager_changes_then_restores_logits():
+    model = tiny_model()
+    ids = torch.tensor([[1, 2, 3, 4, 5]])
+    with torch.no_grad():
+        base = model(input_ids=ids).logits.clone()
+
+    with suppress(model, [(1, 7), (2, 3)]):
+        with torch.no_grad():
+            edited = model(input_ids=ids).logits.clone()
+    assert not torch.allclose(base, edited)
+
+    with torch.no_grad():
+        after = model(input_ids=ids).logits
+    assert torch.allclose(base, after)
+
+
+def test_ablate_and_restore():
+    model = tiny_model()
+    ids = torch.tensor([[1, 2, 3, 4, 5]])
+    with torch.no_grad():
+        base = model(input_ids=ids).logits.clone()
+
+    saved = ablate(model, [(1, 7)])
+    assert torch.count_nonzero(model.model.layers[1].mlp.down_proj.weight[:, 7]) == 0
+    with torch.no_grad():
+        assert not torch.allclose(base, model(input_ids=ids).logits)
+
+    restore(model, saved)
+    with torch.no_grad():
+        assert torch.allclose(base, model(input_ids=ids).logits)
+
+
+def test_run_battery_and_diff_no_edit_is_all_unchanged():
+    model, tok = tiny_model(), FakeTok()
+    probes = [
+        Probe("the capital of France is", "Paris", ("capital", "france")),
+        Probe("the capital of Germany is", "Berlin", ("capital", "germany")),
+        Probe("the weather in Tokyo is", "a", ("weather",)),
+    ]
+    r1 = run_battery(model, tok, probes)
+    r2 = run_battery(model, tok, probes)
+    rep = diff_battery(r1, r2)
+    assert all(row.verdict == "unchanged" for row in rep.rows)
+    assert "unchanged" in rep.summary()
+    out_full = rep.show(full=True)
+    assert "the capital of France is" in out_full
+
+
+def test_metrics_and_frontier():
+    model, tok = tiny_model(), FakeTok()
+    battery = [
+        Probe("the capital of France is", "Paris", ("target",)),
+        Probe("the capital of Italy is", "Rome", ("neighbour",)),
+        Probe("the language of France is", "French", ("control",)),
+    ]
+    r1 = run_battery(model, tok, battery)
+    m = diff_battery(r1, r1).metrics()
+    assert set(m) >= {"target", "neighbour", "control", "_all"}
+    assert m["target"]["n"] == 1
+    assert m["_all"]["moved"] == 0.0
+
+    sweep = suppression_frontier(model, tok, [(1, 7), (1, 12), (2, 3), (2, 9)], battery, sizes=[0, 2, 4])
+    assert [n for n, _ in sweep] == [0, 2, 4]
+    assert all(d.metrics()["target"]["moved"] == 0.0 for n, d in sweep if n == 0)
+
+    tbl = list(frontier_table(sweep, target="target", collateral="neighbour"))
+    assert [row[0] for row in tbl] == [0, 2, 4]
+    assert all(len(row) == 4 for row in tbl)
+    assert tbl[0][1] == 0.0 and tbl[0][2] == 0.0  # n=0: nothing suppressed
+
+
+def test_suppression_by_layer_splits_constellation_across_layers():
+    model, tok = tiny_model(), FakeTok()
+    battery = [
+        Probe("the capital of France is", "Paris", ("target",)),
+        Probe("the capital of Italy is", "Rome", ("neighbour",)),
+        Probe("the language of France is", "French", ("control",)),
+    ]
+    con = [(1, 7), (1, 12), (2, 3)]  # two features at L1, one at L2
+
+    rows = suppression_by_layer(model, tok, con, battery)
+    assert [layer for layer, _, _ in rows] == [1, 2]
+    assert dict((layer, feats) for layer, feats, _ in rows)[1] == (7, 12)
+    assert dict((layer, feats) for layer, feats, _ in rows)[2] == (3,)
+    for _, _, d in rows:
+        m = d.metrics()
+        assert {"target", "neighbour", "control", "_all"} <= set(m)
+
+    cum = suppression_by_layer(model, tok, con, battery, cumulative=True)
+    assert [layer for layer, _, _ in cum] == [1, 2]
+    # cumulative L2 row suppresses all 3 features -> matches a direct study_edit
+    full = study_edit(model, tok, suppress(model, con), battery)
+    assert [r.verdict for r in cum[-1][2].rows] == [r.verdict for r in full.rows]
+
+
+def test_empty_battery_raises_clear_error_not_zerodivision():
+    model, tok = tiny_model(), FakeTok()
+    with pytest.raises(ValueError, match="empty probe list"):
+        run_battery(model, tok, [])
+    # the filtered-to-nothing case that used to blow up deep in rank_by_ablation_effect
+    with pytest.raises(ValueError, match="empty probe list"):
+        rank_by_ablation_effect(model, tok, [(1, 7)], [])
+
+
+def test_target_token_ids_prefers_leading_space_variant():
+    # a real tokenizer would give distinct ids for "Paris" vs " Paris";
+    # here just assert run_battery scores a candidate set, not one bad id,
+    # and that an identical rerun is unchanged.
+    model, tok = tiny_model(), FakeTok()
+    probes = [Probe("the capital of France is", "Paris", ("target",))]
+    r = run_battery(model, tok, probes).rows[0]
+    assert isinstance(r.target_ids, tuple) and len(r.target_ids) >= 1
+    assert r.target_id == r.target_ids[0]
+    r2 = run_battery(model, tok, probes).rows[0]
+    assert r.target_rank == r2.target_rank and r.target_prob == r2.target_prob
+
+
+def test_rank_by_ablation_effect_orders_by_measured_drop():
+    model, tok = tiny_model(), FakeTok()
+    probes = [Probe("the capital of France is", "Paris", ("target",))]
+    cands = [(1, 7), (1, 12), (2, 3), (2, 9), (0, 1)]
+    ranked = rank_by_ablation_effect(model, tok, cands, probes)
+    assert len(ranked) == len(cands)
+    drops = [d for _, d in ranked]
+    assert drops == sorted(drops, reverse=True)
+
+
+def test_contextual_constellation_runs():
+    from marv.edit import constellation
+
+    vindex = extract(tiny_model())
+    build_down_meta(vindex, k=5)
+    model, tok = tiny_model(), FakeTok()
+    rows = constellation(
+        vindex, tok, "France", model=model, prompt="the capital of France is",
+        baseline_prompt="the capital of", per_layer=2,
+    )
+    assert rows
+    assert [r.sim for r in rows] == sorted((r.sim for r in rows), reverse=True)
+
+
+def test_study_edit_returns_report():
+    model, tok = tiny_model(), FakeTok()
+    battery = [
+        Probe("the capital of France is", "Paris", ("capital",)),
+        Probe("the capital of Italy is", "Rome", ("capital",)),
+        Probe("the language of France is", "French", ("language",)),
+    ]
+    rep = study_edit(model, tok, suppress(model, [(1, 7), (1, 12)]), battery)
+    assert len(rep.rows) == 3
+    assert all(v in {"flipped", "degraded", "improved", "unchanged"} for v in (r.verdict for r in rep.rows))
+    s = rep.show()
+    assert isinstance(s, str)
+
+
+def test_extract_streaming_from_safetensors(tmp_path):
+    from safetensors.numpy import save_file
+
+    from marv.extract import extract_streaming
+
+    h, inter, vocab, n = 8, 16, 32, 3
+    t = {}
+    rng = np.random.default_rng(0)
+    for i in range(n):
+        t[f"model.layers.{i}.mlp.gate_proj.weight"] = rng.standard_normal((inter, h), dtype=np.float32)
+        t[f"model.layers.{i}.mlp.down_proj.weight"] = rng.standard_normal((h, inter), dtype=np.float32)
+    t["model.embed_tokens.weight"] = rng.standard_normal((vocab, h), dtype=np.float32)
+    t["model.norm.weight"] = np.ones(h, np.float32)
+    save_file(t, str(tmp_path / "model.safetensors"))
+
+    v = extract_streaming(str(tmp_path))
+    assert v.num_layers == n
+    assert v.hidden_size == h
+    assert v.gate[0].shape == (inter, h)
+    assert v.lm_head is v.embed  # tied (no lm_head key)
+    assert v.layer_bands is not None
+
+
+def test_describe_entity_sorted_and_tokenized():
+    vindex = extract(tiny_model())
+    build_down_meta(vindex, k=6)
+    rows = describe_entity(vindex, FakeTok(), "France", band="knowledge", k_features=3)
+    assert rows
+    sims = [r.sim for r in rows]
+    assert sims == sorted(sims, reverse=True)
+    assert all(isinstance(r.tokens, list) and r.tokens for r in rows)
+
+    vindex.suppress(rows[0].layer, rows[0].feature)
+    rows2 = describe_entity(vindex, FakeTok(), "France", band="knowledge", k_features=3)
+    flagged = [r for r in rows2 if r.suppressed]
+    assert any(r.layer == rows[0].layer and r.feature == rows[0].feature for r in flagged)
