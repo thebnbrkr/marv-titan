@@ -61,13 +61,35 @@ def marginal_entropy(tok) -> float:
     return float(-(p * np.log(p)).sum())
 
 
-def load_ett_stream(name: str = "ETTm1"):
-    """All 7 channels, quantised per-channel then concatenated."""
+def load_ett_stream(name: str = "ETTm1", split: str = "interleaved"):
+    """All 7 channels, quantised per-channel then concatenated.
+
+    split="temporal" holds out the last 10% in time. That is correct for a
+    forecasting benchmark, but ETT is non-stationary: the tail sits in a regime
+    the training quantile edges were never fitted to, and validation loss comes
+    out ABOVE the uniform baseline (5.545 nats) even while training loss falls.
+    A gate measured on that passage is read on out-of-distribution data.
+
+    split="interleaved" (default) holds out every 10th contiguous block instead,
+    so train and validation span the same regimes. We are measuring what the
+    memory does, not forecasting a future, so in-distribution held-out data is
+    the right choice here.
+    """
     raw = np.genfromtxt(_download(ETT + name + ".csv", name + ".csv"),
                         delimiter=",", skip_header=1, usecols=range(1, 8))
     tr, va = [], []
     for ch in range(raw.shape[1]):
-        t, v = quantize(raw[:, ch])
+        s = raw[:, ch]
+        s = s[np.isfinite(s)]
+        if split == "temporal":
+            t, v = quantize(s)
+        else:
+            blocks = np.array_split(s, 50)          # 50 contiguous blocks
+            va_raw = np.concatenate(blocks[::10])   # every 10th -> ~10%
+            tr_raw = np.concatenate([b for i, b in enumerate(blocks) if i % 10])
+            edges = np.quantile(tr_raw, np.linspace(0, 1, N_BINS + 1)[1:-1])
+            t = torch.from_numpy(np.digitize(tr_raw, edges)).long()
+            v = torch.from_numpy(np.digitize(va_raw, edges)).long()
         tr.append(t); va.append(v)
     return torch.cat(tr), torch.cat(va)
 
