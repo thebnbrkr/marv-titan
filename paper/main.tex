@@ -221,10 +221,61 @@ differences. We report this as a negative, exploratory finding. It is consistent
 with the surprise-driven write of Eq.~14, under which unpredictable input keeps
 producing large gradients and therefore large writes.
 
+
+\section{The same question, asked of a deployed forecaster}
+
+The result above concerns a memory that updates at test time. It is natural to
+ask whether distributed storage is peculiar to that setting or general. We
+therefore applied the identical causal protocol to \textbf{Chronos-Bolt}
+\citep{ansari2024chronos}, a deployed time-series foundation model, replacing
+recall cosine with a forecasting metric.
+
+Chronos-Bolt is a T5 encoder-decoder that patches the context and regresses nine
+quantiles directly; it carries no token vocabulary, so weight-space lenses do not
+apply, but ablation does. We zero one FFN feature (row $j$ of $W_{\text{in}}$,
+column $j$ of $W_{\text{out}}$), re-forecast, and measure Weighted Quantile Loss
+(WQL) on held-out windows. The \texttt{tiny} checkpoint has $8$ FFN layers
+$\times\,1024$ features $=8192$ features.
+
+\paragraph{Controls.} On ETTh1 (56 windows, context 512, horizon 64) the model
+scores WQL $0.939$ against $2.055$ for a last-value baseline, so it is genuinely
+forecasting. Zeroing \emph{all} FFN features raises WQL to $22.65$
+($+2312\%$)---the ablation is not a no-op.
+
+\begin{table}[h]
+\centering
+\caption{Randomly removing FFN features from Chronos-Bolt (tiny). Change in WQL
+relative to the unablated model, averaged over 3 draws.}
+\label{tab:chronos}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+Dataset & baseline WQL & $-25\%$ & $-50\%$ & $-75\%$ & $-100\%$ \\
+\midrule
+ETTh1 & 0.939 & $-0.4\%$ & $+0.3\%$ & $+11.5\%$ & $+2312\%$ \\
+ETTm1 & 0.643 & $+3.1\%$ & $+10.9\%$ & $+241.5\%$ & $+6469\%$ \\
+ETTh2 & 1.235 & $+1.4\%$ & $-2.4\%$ & $-2.1\%$ & $+423\%$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+No single feature carries a measurable share of accuracy: across 192 sampled
+ablations the largest effect on WQL was $+0.20\%$. Removing any single FFN
+\emph{layer} moved WQL by between $-1.4\%$ and $+1.6\%$. Half the features can be
+removed for $+0.3\%$ on ETTh1 and $-2.4\%$ on ETTh2, though ETTm1 is stricter at
+$+10.9\%$ (Table~\ref{tab:chronos}). The FFN is thus collectively essential and
+individually near-redundant.
+
+This is the same picture the test-time memory gives---no localized storage, heavy
+distribution---now on a frozen forecaster judged by forecasting error. We report
+it as a bounded observation: one model family, the smallest checkpoint, three
+datasets from one domain, and a redundancy level that clearly depends on the
+series.
+
 \section{Limitations}
 
 All results are small-scale: a $256$-unit memory, short contexts, short training
-runs. We study one architecture and one public implementation, and cannot verify
+runs. The Chronos results use the smallest checkpoint of one model family on three datasets from a single domain. We study one memory architecture and one public implementation, and cannot verify
 whether the authors' unreleased code shares the scalar-gate restriction. The
 per-unit decay result assigns rates directly rather than learning them, so it
 establishes that per-dimension decay \emph{permits} localization, not that
@@ -236,6 +287,10 @@ not of the model's total context reach.
 \bibitem[Behrouz et al.(2025)]{behrouz2025titans}
 A.~Behrouz, P.~Zhong, and V.~Mirrokni. Titans: Learning to memorize at test
 time. \emph{NeurIPS}, 2025. arXiv:2501.00663.
+
+\bibitem[Ansari et al.(2024)]{ansari2024chronos}
+A.~F.~Ansari, L.~Stella, C.~Turkmen, et al. Chronos: Learning the language of
+time series. \emph{TMLR}, 2024. arXiv:2403.07815.
 
 \bibitem[Challu et al.(2023)]{challu2023nhits}
 C.~Challu, K.~G.~Olivares, B.~N.~Oreshkin, et al. NHITS: Neural hierarchical
