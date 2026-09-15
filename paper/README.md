@@ -28,13 +28,13 @@ Check the page count once compiled -- over-length is a desk reject.
 
 ## NEEDS VERIFICATION BEFORE SUBMITTING
 
-**Section 4, "it is a trade, not a free win"** (spread decay ~0.10-0.15 recall vs
-uniform 0.39-0.65). These numbers come from a quick standalone check at
-hidden=8/16/32 with 60 pairs and 3 seeds -- NOT the 256-unit setup the rest of
-the paper uses. Either re-run it at hidden=256 with the paper's configuration,
-or soften the sentence to "in a reduced-capacity variant we observed ..." and
-move the numbers to an appendix. Do not ship the current numbers as if they came
-from the main setup.
+~~Section 4 trade-off numbers~~ **RESOLVED.** Re-run at the paper's actual
+configuration (DIM=64, HIDDEN=256, 8 seeds, un-normalised pairs as in
+`titans_per_unit.py::main`). Verified numbers now in the text:
+n=12 uniform 0.838 / spread 0.544; n=32 0.606 / 0.398; n=64 uniform 0.000
+(max|w| 1.3e-10) / spread 0.303; n=96 uniform 0.000 (max|w| 3.3e-15) /
+spread 0.250. The collapse is genuine weight decay to numerical zero, not NaN --
+checked.
 
 **Section 6 accumulation numbers** are single-seed. Either re-run with 3 seeds or
 keep the hedged wording already in the text.
