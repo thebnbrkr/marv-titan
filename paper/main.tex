@@ -1,6 +1,5 @@
 \documentclass{article}
 \usepackage[final]{neurips_2026}
-
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
 \usepackage{hyperref}
@@ -8,270 +7,250 @@
 \usepackage{booktabs}
 \usepackage{amsfonts}
 \usepackage{amsmath}
-\usepackage{nicefrac}
 \usepackage{microtype}
-\usepackage{graphicx}
 
-\title{A scalar forget gate prevents localized storage\\in test-time neural memory}
+\title{One Timescale: The Effective Horizon of a\\Test-Time Neural Memory}
 
-% Anonymous for double-blind review.
-\author{%
-  Anonymous Author(s)\\
-  Affiliation\\
-  \texttt{email}
-}
+\author{Anonymous Author(s)\\Affiliation\\\texttt{email}}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-Test-time neural memory modules are increasingly proposed as the persistent-state
-component of long-horizon sequence models, yet little is known about \emph{what}
-such a memory stores or \emph{where}. We audit the neural memory of Titans and
-report three findings. First, an implementation-fidelity gap: the paper's appendix
-specifies a per-dimension decay $\mathrm{diag}(1-\alpha_t)$, but the community
-implementation the field builds on emits a single scalar per head, broadcast
-identically to every hidden unit. Second, a causal consequence: under the scalar
-gate no hidden unit owns any stored association---the largest effect of deleting
-any single unit on any tracked pair is $0.13$ cosine---while assigning units
-independent decay rates restores localization across $8/8$ seeds, with
-single-unit effects $5$--$7\times$ larger. Third, an evaluation trap: the memory's
-residual path inflates apparent recall, so that zeroing the entire memory MLP
-leaves all but the two freshest associations essentially unchanged. We further
-show that whether the memory forgets or accumulates reverses with the training
-corpus, and, using a predictability sweep with marginal entropy held fixed,
-test whether that reversal tracks temporal structure in the data. Our results
-are small-scale but causal, and they bear directly on the reliability of
-persistent state in temporal sequence models.
+Test-time neural memory is increasingly proposed as the persistent-state
+component of long-horizon sequence models, on the premise that a recurrently
+updated state can retain information that attention windows discard. We ask a
+simple question of one such module: \emph{how long does it actually remember?}
+In a state-space recursion $M_t=(1-\alpha_t)M_{t-1}+S_t$, the forget gate
+$\alpha_t$ is a memory horizon, $\tau=-1/\ln(1-\alpha_t)$. Reading $\alpha_t$
+directly out of trained Titans models, we measure $\tau=0.74$--$1.16$ chunks,
+i.e. \textbf{6--9 sequence positions against a 256-position context}---two to
+four percent of what the model sees. We then show this is structural rather
+than incidental: the paper's appendix specifies a per-dimension decay
+$\mathrm{diag}(1-\alpha_t)$, but the implementation the field builds on emits
+\emph{one scalar per head}, broadcast to all 256 memory units, so the memory
+has exactly one timescale no matter how many dimensions it has. Causally, under
+that scalar gate no hidden unit owns any stored association (largest
+single-unit ablation effect $0.13$ cosine); granting units independent decay
+rates restores localization in $8/8$ seeds, at a measurable cost to recall
+fidelity. We also report an evaluation trap: the memory's residual path
+inflates apparent recall, so that zeroing the entire memory MLP leaves all but
+the two freshest associations unchanged. Our results are small-scale but
+causal, and they bear on how persistent state in temporal models is specified,
+implemented, and measured.
 \end{abstract}
 
 \section{Introduction}
 
-Architectures that update a memory \emph{during inference}---test-time training,
-neural memory, and state-space hybrids---are being adopted as the persistent-state
-mechanism for long-horizon sequence modeling. Titans \citep{behrouz2025titans} is a
-prominent instance: a small MLP whose weights are rewritten chunk-by-chunk as the
-model reads, governed by a learned forget gate.
+Architectures that update a memory \emph{during inference}---test-time
+training, neural memory, and state-space hybrids---are being adopted as the
+persistent-state mechanism for long-horizon sequence modeling. Titans
+\citep{behrouz2025titans} is a prominent instance: a small MLP whose weights are
+rewritten chunk-by-chunk as the model reads, governed by a learned forget gate.
 
-The memory update is a discrete-time state-space recursion,
+Temporal systems are the natural stress test for such a claim, because real
+temporal data carries several periodicities at once and a memory must hold them
+simultaneously. That requirement is the premise of multi-rate forecasting
+architectures \citep{challu2023nhits}. It is also a precise, checkable property
+of a recurrent memory: in
 \begin{equation}
 M_t = (1-\alpha_t)\,M_{t-1} + S_t,
 \label{eq:update}
 \end{equation}
-where $\alpha_t$ is a decay rate---a \emph{timescale}. If such modules are to serve
-as reliable persistent state, we should be able to say what they retain, for how
-long, and whether a stored item can be located or corrected. These are the same
-questions asked of frozen weights in interpretability research, now posed of a
-state that is still moving.
+the decay rate $\alpha_t$ \emph{is} a timescale, with time constant
+$\tau=-1/\ln(1-\alpha_t)$ steps. A scalar $\alpha_t$ buys one timescale; a
+per-dimension $\alpha_t$ buys as many as there are dimensions.
 
-We audit this memory directly, by intervention rather than correlation. Our
-contributions are (i) an undocumented divergence between the specification and the
-implementation the field actually runs, (ii) a causal demonstration that this
-divergence determines whether storage can localize at all, (iii) an evaluation
-confound that inflates recall measurements, and (iv) evidence that the memory's
-retention regime is set by its training distribution, with a controlled test of
-whether temporal predictability is the driver.
+This paper asks what a deployed test-time memory actually provides. We make
+three contributions. First, we \textbf{measure} the effective horizon of a
+trained Titans memory and find it is a few percent of the context length.
+Second, we trace this to a \textbf{specification/implementation gap}: the
+architecture's own appendix writes the decay in per-dimension form, while the
+implementation the community runs collapses it to a scalar. Third, we show the
+\textbf{causal consequence} for what the memory can store, and identify a
+measurement confound that inflates apparent retention.
 
-\section{Setup}
+\section{Setup, and what the gate actually is}
 
 No official implementation of Titans has been released. We therefore study the
-most widely used public reimplementation,\footnote{\texttt{titans-pytorch}, an
-unofficial PyTorch implementation. Cited by URL in the camera-ready; omitted here
-only where it would identify the authors.} which is the de facto Titans for work
-building on the architecture. \textbf{Claims below are properties of that
-implementation, not necessarily of the authors' internal code}, which we cannot
-inspect.
+most widely used public reimplementation, which is the de facto Titans for work
+building on the architecture.\footnote{Cited by URL in the camera-ready;
+omitted here to preserve anonymity.} \textbf{Claims below are properties of that
+implementation, not necessarily of the authors' unreleased code.}
 
-Unless stated otherwise we use a memory MLP of shape $64\to256\to64$ ($256$ hidden
-units) inside a 4-layer Memory-as-Context transformer with $\mathrm{dim}=64$ and a
-single memory layer. Two regimes are used: a \emph{toy} regime in which the memory
-is trained to recall random key/value vectors, and a \emph{corpus} regime in which
-the full model is trained for next-token prediction.
+Unless stated otherwise the memory is an MLP of shape $64\to256\to64$ ($256$
+hidden units) inside a 4-layer Memory-as-Context transformer, $\mathrm{dim}=64$,
+one memory layer, chunk size $8$, context $256$.
 
-\section{The forget gate is coarser than specified}
+\paragraph{Specification.} Equation~\ref{eq:update} is Eq.~13 of
+\citet{behrouz2025titans}, with $\alpha_t\in[0,1]$ and no per-unit index.
+Appendix~C's fuller derivation writes the same recursion as
+$\mathcal{M}_t = \mathrm{diag}(1-\alpha_t)\mathcal{M}_t + S_t$ (Eq.~32), with
+$\mathrm{diag}(\eta_t)$ and $\mathrm{diag}(\theta_t)$ likewise (Eq.~33)---a
+per-dimension form that would permit each memory dimension its own retention
+rate. We note this appendix section argues Titans generalizes Gated DeltaNet,
+so the diagonal form may be presentational; we report what is written rather
+than inferring intent.
 
-Equation~\ref{eq:update} in the main text of \citet{behrouz2025titans} carries no
-per-unit index. Appendix~C's fuller derivation writes the decay as
-$\mathrm{diag}(1-\alpha_t)$, which would permit each memory dimension its own
-retention rate.
+\paragraph{Implementation.} The module producing $\alpha_t$ is a linear map to
+$\texttt{heads}$ outputs whose result is reshaped with a trailing dimension of
+size one, then consumed by an associative scan. It therefore emits \emph{one
+scalar per head per chunk}, broadcast identically across all $256$ hidden units.
+The scalar form is what makes the parallel scan efficient---this is a known and
+motivated trade, shared with Mamba-2 and Gated DeltaNet. Our contribution is not
+that the gate is scalar, but what that costs.
 
-In the implementation, the modules producing $\alpha_t$ and the adaptive step size
-each emit \textbf{one scalar per head, per chunk}, broadcast identically across all
-$256$ hidden units. The finer form in Appendix~C is not available. We found no
-statement of this as a deliberate deviation; a cheaper controller and compatibility
-with the parallel associative-scan training path are plausible motivations, but we
-do not have evidence for either.
+\section{How long does it remember?}
 
-This matters because it is a structural constraint, not a tuning choice: with one
-shared decay, every unit's retention is coupled, and no unit can specialize in
-retaining one item longer than another.
-
-\section{Under the scalar gate, nothing localizes}
-
-\paragraph{Protocol.} We store $N$ tracked key/value pairs in the memory, then
-ablate one hidden unit at a time and re-measure the recall of every pair through
-the library's own retrieval path, verified to reproduce the unmodified model's
-output at $\cos \approx 1.0$.
-
-\paragraph{Result.} No unit's deletion concentrates on any one pair. The largest
-effect any single ablated unit had on any single pair's recall was $\mathbf{0.13}$
-on a cosine scale, in both trained and untrained memories.
-
-\paragraph{The gate is the cause.} To test whether the shared gate is responsible
-rather than some other property of training, we assign each unit its own fixed
-decay rate---instantiating Appendix~C's $\mathrm{diag}(1-\alpha_t)$ directly---and
-change nothing else. An end-to-end learned per-unit gate did not converge in a
-reasonable budget; assigning rates directly isolates the single variable.
+Because the decay is applied once per chunk, $\alpha_t$ converts directly into a
+horizon. Table~\ref{tab:tau} gives the mapping; Table~\ref{tab:measured} gives
+$\alpha_t$ read out of trained models by hooking the decay module during a real
+forward pass.
 
 \begin{table}[h]
 \centering
-\caption{Largest single-unit ablation effect on any tracked pair, across
-independent seeds. Spread decay exceeds uniform decay's ceiling in every seed.}
-\label{tab:perunit}
-\begin{tabular}{lcc}
+\begin{minipage}{0.46\textwidth}
+\centering
+\caption{A decay rate is a horizon.}
+\label{tab:tau}
+\small
+\begin{tabular}{rrl}
 \toprule
-Seed & Uniform decay & Per-unit (spread) decay \\
+$\alpha$ & $\tau$ (steps) & can hold \\
 \midrule
-0 & 0.019 & 0.157 \\
-1 & 0.024 & 0.099 \\
-2 & 0.017 & 0.182 \\
-3 & 0.015 & 0.158 \\
-4--7 & 0.016--0.020 & 0.102--0.207 \\
+0.001 & 999 & weekly cycle \\
+0.010 & 99 & daily cycle \\
+0.050 & 19 & local structure \\
+0.300 & 2.8 & the last step \\
+0.740 & 0.74 & \emph{measured here} \\
+\bottomrule
+\end{tabular}
+\end{minipage}\hfill
+\begin{minipage}{0.50\textwidth}
+\centering
+\caption{Measured gate, trained models.}
+\label{tab:measured}
+\small
+\begin{tabular}{lrrr}
+\toprule
+run & $\alpha$ & $\tau$ (chk) & $\tau$ (pos) \\
 \midrule
-Units cleanly owning one pair & $0/8$ seeds & $4/8$ seeds \\
+1.2k steps & 0.579 & 1.16 & 9.2 \\
+3k steps (a) & 0.741 & 0.74 & 5.9 \\
+3k steps (b) & 0.740 & 0.74 & 5.9 \\
+\midrule
+\multicolumn{4}{l}{\footnotesize context: 256 positions} \\
+\bottomrule
+\end{tabular}
+\end{minipage}
+\end{table}
+
+The measured horizon is $\tau=0.74$--$1.16$ chunks, or $6$--$9$ sequence
+positions against a $256$-position context: \textbf{2--4\% of what the model
+sees}. The value is stable across training lengths and across seeds, and---as we
+showed separately---barely moves between real text and random input, so it is a
+property the model settles into during training rather than a live response to
+what it is reading.
+
+Two bounds on this claim. The memory's contribution is not the model's total
+reach: attention and the residual stream carry information independently, so
+this measures how fast \emph{the memory's} content decays, not how far the model
+can see. And because the gate is a single scalar, there is no second, longer
+timescale hiding in other units---one $\alpha$ is one $\tau$, for all $256$.
+
+\section{What a single timescale costs}
+
+\paragraph{No unit owns a fact.} We store $N$ tracked key/value pairs, ablate one
+hidden unit at a time, and re-measure every pair's recall through the library's
+own retrieval path (verified to reproduce the unmodified output at
+$\cos\approx1.0$). The largest effect any single ablated unit had on any single
+pair was $\mathbf{0.13}$ on a cosine scale, trained or untrained. Nothing
+localizes.
+
+\paragraph{The gate is the cause.} Instantiating Appendix~C's
+$\mathrm{diag}(1-\alpha_t)$ directly---assigning each unit its own fixed decay
+rate and changing nothing else---restores localization
+(Table~\ref{tab:perunit}). Under uniform decay, $0/8$ seeds produced a unit
+cleanly owning one pair; under spread decay, $4/8$ did, and even the
+non-crossing seeds ran $5$--$7\times$ above uniform's ceiling in every seed.
+
+\begin{table}[h]
+\centering
+\caption{Largest single-unit ablation effect on any tracked pair, per seed.}
+\label{tab:perunit}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Seed & 0 & 1 & 2 & 3 & 4--7 \\
+\midrule
+Uniform decay & 0.019 & 0.024 & 0.017 & 0.015 & 0.016--0.020 \\
+Per-unit (spread) decay & 0.157 & 0.099 & 0.182 & 0.158 & 0.102--0.207 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Localization appears only when units are given independent decay
-(Table~\ref{tab:perunit}). We read this as superposition
-\citep{elhage2022superposition} in a state written during a single forward pass:
-the memory holds more associations than it has independently-decaying slots, so
-gradient descent shares units across items. Under the scalar gate the number of
-such slots is effectively one.
+\paragraph{But it is a trade, not a free win.} Per-unit decay is not simply
+better. Measuring aggregate recall under capacity pressure, spread decay is
+worse at every lag we tested---roughly $0.10$--$0.15$ against $0.39$--$0.65$ for
+uniform---because spreading rates across $[0.02,0.98]$ leaves many units wiping
+themselves almost every step. The diagonal form buys localizability and pays for
+it in retention. We report this because it bounds the obvious prescription.
 
-\paragraph{Editing inherits the entanglement.} Solving for a unit's output row so
-that it recalls an arbitrary new target is exact ($\cos = 1.000$ to the new
-target); the cost is collateral. Selecting units by ablation-specificity does not
-reduce it---a unit roughly $2\times$ more ablation-specific produced \emph{more}
-collateral ($0.540$ vs.\ $0.473$), because ablation-specificity measures how small
-a unit's existing contribution to other pairs is, while editing collateral depends
-on how strongly it activates for their keys.
+\section{An evaluation trap}
 
-\section{An evaluation trap: the residual floor}
-
-The default memory is $\mathrm{ResidualNorm}(\mathrm{MemoryMLP}(x))$, i.e.\
+The default memory is $\mathrm{ResidualNorm}(\mathrm{MemoryMLP}(x))$, i.e.
 $\mathrm{LN}(\mathrm{MLP}(q))\cdot\gamma + q$. Zeroing the \emph{entire} MLP---
 removing all learned memory content---left most pairs' recall nearly unchanged;
-only the two freshest showed a real contribution ($0.96\to0.59$ and
-$0.97\to0.57$). Most of what a naive read scores as ``recall'' is the residual
-path returning the query, not stored content.
+only the two freshest showed a real contribution ($0.96\to0.59$,
+$0.97\to0.57$). Most of what a naive read scores as recall is the residual path
+returning the query.
 
 Any evaluation of this architecture that does not zero the memory as a control
 will overstate retention, and the overstatement is largest for exactly the old
-items long-horizon claims depend on.
+items that long-horizon claims depend on.
 
-\section{Retention regime is set by the training distribution}
+\section{Preliminary: retention does not track input statistics}
 
-In the toy regime the memory forgets sharply: the first write decays to a few
-percent of peak within six chunks (end/early write-norm ratio $0.05$--$0.06$). On
-natural text the same measurement \emph{reverses}: across five independent runs the
-ratio is $1.42$--$2.21$, i.e.\ the memory accumulates, with the effect strongest in
-the better-trained runs.
-
-We tested two mechanisms and ruled both out. Hooking the decay module directly and
-comparing its output on real text against random bytes through identical weights
-showed no stable gap ($\le 0.033$, and in the direction opposite the hypothesis).
-Measuring $\cos(\text{write}_t, \text{write}_{t-1})$ showed no stable difference
-between real and random input. What remains is that the regime is fixed by what the
-memory was \emph{trained} on, rather than decided live from what it reads.
-
-\paragraph{A controlled test.} To test that directly we sweep temporal
-predictability while holding the marginal distribution fixed. Each corpus---AR(1)
-processes with increasing $\phi$, a periodic signal, a real forecasting benchmark,
-and text---is mapped to $256$ equal-frequency bins, so all corpora have identical
-marginal entropy ($5.545$ nats) and differ only in temporal dependence
-(lag-1 mutual information $0.002$ to $1.71$ nats). The same architecture is trained
-on each, and the write-norm ratio is measured on held-out data.
-\textbf{[Results pending; see Table~\ref{tab:temporal}.]}
-
-\begin{table}[h]
-\centering
-\caption{Retention regime versus temporal predictability, marginal entropy matched.}
-\label{tab:temporal}
-\begin{tabular}{lccc}
-\toprule
-Corpus & Lag-1 MI (nats) & Val.\ loss (nats) & Write-norm ratio \\
-\midrule
-AR(1), $\phi=0.00$ & 0.002 & --- & --- \\
-AR(1), $\phi=0.50$ & 0.138 & --- & --- \\
-Periodic & 0.686 & --- & --- \\
-AR(1), $\phi=0.90$ & 0.778 & --- & --- \\
-AR(1), $\phi=0.99$ & 1.706 & --- & --- \\
-Real benchmark & --- & --- & --- \\
-Text & --- & --- & --- \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\section{Related work}
-
-\citet{titansrevisited2025} reimplement Titans and report that chunking limits
-performance and that memory updates alone do not deliver meaningful test-time
-learning. That work evaluates behavior at the benchmark level; ours opens the
-memory and asks where content sits, so the two are complementary.
-
-\citet{young2026writesae} learns rank-1 dictionary atoms over the writes of Gated
-DeltaNet, Mamba-2, and RWKV-7, and reports both localized and superposed atoms with
-little collateral from erasure. We study a different architecture with a different
-method---direct causal ablation of raw units, with no learned decomposition---and
-find substantial collateral. We take this as consistent rather than contradictory:
-dictionary learning is designed to recover a sparse, reusable basis, which is
-precisely the entanglement that raw units exhibit. Applying such a decomposition to
-Titans before editing is a natural next step.
-
-\citet{yildirim2026superposition} finds, using sparse autoencoders on a forecasting
-transformer, that superposition is \emph{not} necessary for competitive time-series
-forecasting. Our setting differs in that the state under study is written at test
-time, and we find entanglement to be forced by the gate rather than optional.
+Measuring the end-of-passage versus early write magnitude across corpora matched
+for marginal entropy, the memory \emph{accumulated} in every case, including
+i.i.d.\ noise with no learnable structure (ratio $3.03$, $2.86$, $4.27$ at
+$256/512/1024$ units). We could not resolve a relationship with predictability
+at this scale, and single-run variation was comparable to between-corpus
+differences. We report this as a negative, exploratory finding. It is consistent
+with the surprise-driven write of Eq.~14, under which unpredictable input keeps
+producing large gradients and therefore large writes.
 
 \section{Limitations}
 
-All results are small-scale: a $256$-unit memory, short documents, and short
-training runs. We study one architecture and one public implementation, and cannot
-verify whether the authors' unreleased code shares the scalar-gate restriction. The
-per-unit decay result uses directly assigned rates rather than a learned gate, so
-it establishes that per-unit decay \emph{permits} localization, not that a trained
-model would discover it. The cause of the retention reversal remains open; the
-sweep in Section~6 narrows it but does not by itself identify a mechanism.
+All results are small-scale: a $256$-unit memory, short contexts, short training
+runs. We study one architecture and one public implementation, and cannot verify
+whether the authors' unreleased code shares the scalar-gate restriction. The
+per-unit decay result assigns rates directly rather than learning them, so it
+establishes that per-dimension decay \emph{permits} localization, not that
+training would discover it. The horizon measurement is of the memory's decay,
+not of the model's total context reach.
 
 \begin{thebibliography}{9}
 \small
 \bibitem[Behrouz et al.(2025)]{behrouz2025titans}
-A.~Behrouz, P.~Zhong, and V.~Mirrokni.
-\newblock Titans: Learning to memorize at test time.
-\newblock \emph{NeurIPS}, 2025. arXiv:2501.00663.
+A.~Behrouz, P.~Zhong, and V.~Mirrokni. Titans: Learning to memorize at test
+time. \emph{NeurIPS}, 2025. arXiv:2501.00663.
+
+\bibitem[Challu et al.(2023)]{challu2023nhits}
+C.~Challu, K.~G.~Olivares, B.~N.~Oreshkin, et al. NHITS: Neural hierarchical
+interpolation for time series forecasting. \emph{AAAI}, 2023. arXiv:2201.12886.
 
 \bibitem[Elhage et al.(2022)]{elhage2022superposition}
-N.~Elhage et al.
-\newblock Toy models of superposition.
-\newblock \emph{Transformer Circuits Thread}, 2022. arXiv:2209.10652.
+N.~Elhage et al. Toy models of superposition. \emph{Transformer Circuits
+Thread}, 2022. arXiv:2209.10652.
 
 \bibitem[Titans Revisited(2025)]{titansrevisited2025}
 Titans revisited: A lightweight reimplementation and critical analysis of a
-test-time memory model.
-\newblock 2025. arXiv:2510.09551.
+test-time memory model. 2025. arXiv:2510.09551.
 
 \bibitem[Young(2026)]{young2026writesae}
-J.~Young.
-\newblock WriteSAE: Sparse autoencoders for recurrent state.
-\newblock 2026. arXiv:2605.12770.
-
-\bibitem[Y{\i}ld{\i}r{\i}m(2026)]{yildirim2026superposition}
-A.~Y{\i}ld{\i}r{\i}m.
-\newblock Superposition is not necessary: A mechanistic interpretability analysis
-of transformer representations for time series forecasting.
-\newblock 2026. arXiv:2605.05151.
+J.~Young. WriteSAE: Sparse autoencoders for recurrent state. 2026.
+arXiv:2605.12770.
 \end{thebibliography}
 
 \end{document}
