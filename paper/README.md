@@ -25,6 +25,12 @@ Check the page count once compiled -- over-length is a desk reject.
 | 0/8 vs 4/8 seeds localizing | `titans_per_unit.py` | measured, 8 seeds |
 | residual floor: 0.96->0.59, 0.97->0.57 | `titans_ablation.py::check_residual` | measured |
 | accumulation 3.03/2.86/4.27 | extended notebook, Test A | measured, 1 seed |
+| Chronos baseline WQL 0.939 vs naive 2.055 | `chronos_ablation.py` | measured |
+| all-FFN-zeroed +2312% (positive control) | `chronos_ablation.py` | measured |
+| max single-feature effect +0.71% | exhaustive sweep, all 8192 | measured |
+| 30% hurt / 28% help on removal | exhaustive sweep | measured |
+| top 10% of features = 67% of effect | exhaustive sweep | derived |
+| -25/-50/-75% group ablation table | `chronos_ablation.py`, 3 seeds | measured |
 
 ## NEEDS VERIFICATION BEFORE SUBMITTING
 

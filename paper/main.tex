@@ -270,9 +270,15 @@ ETTh2 & 1.235 & $+1.4\%$ & $-2.4\%$ & $-2.1\%$ & $+423\%$ \\
 \end{tabular}
 \end{table}
 
-No single feature carries a measurable share of accuracy: across 192 sampled
-ablations the largest effect on WQL was $+0.20\%$. Removing any single FFN
-\emph{layer} moved WQL by between $-1.4\%$ and $+1.6\%$. Half the features can be
+No single feature carries a measurable share of accuracy. Ablating
+\textbf{every one of the 8192 features individually}, the largest effect on WQL
+was $+0.71\%$ (encoder layer 4, feature 693); $30\%$ of features degraded the
+forecast when removed and $28\%$ \emph{improved} it, the rest falling inside
+run-to-run noise. Effect is mildly concentrated---the top $10\%$ of features
+account for $67\%$ of the total absolute effect, and the last encoder layer
+carries $2$--$4\times$ the mean effect of any other---but the absolute scale
+stays under one percent throughout. Removing any single FFN \emph{layer} moved
+WQL by between $-1.4\%$ and $+1.6\%$. Half the features can be
 removed for $+0.3\%$ on ETTh1 and $-2.4\%$ on ETTh2, though ETTm1 is stricter at
 $+10.9\%$ (Table~\ref{tab:chronos}). The FFN is thus collectively essential and
 individually near-redundant.
