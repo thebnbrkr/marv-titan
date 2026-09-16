@@ -1,5 +1,9 @@
 # MARV — Model Architecture Research via Vindex
 
+> **Reproducing the paper:** see [REPRODUCE.md](REPRODUCE.md) for the script
+> that produces each reported number, and the setup needed to run them.
+
+
 MARV turns a transformer's gated FFN weights into an inspectable index
 (a **vindex**) so you can browse what a small model knows, diff two
 checkpoints at the level of individual FFN features, edit the live model
