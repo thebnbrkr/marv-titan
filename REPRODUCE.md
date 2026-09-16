@@ -13,20 +13,24 @@ pip install -r requirements.txt
 pip install titans-pytorch
 ```
 
-Training runs need a GPU; a single A100 (or a Colab T4, more slowly) is enough.
-Each 6k-step run takes roughly 20-30 minutes on an A100. Every *measurement* is
+Training runs need a GPU; one A100 is enough. Each 6k-step run takes
+roughly 20-30 minutes. Every *measurement* is
 a single forward pass and runs on CPU in seconds.
 
 ## Result map
 
 | Paper result | Produced by |
 |---|---|
-| Table 1: both learned controls across five corpora (gate, horizon, learning rate, cv) | `experiments/titans_horizon_timeseries.py` |
-| Model width: alpha = 0.741 at dim 64 vs 0.227 at dim 384 | `notebooks/titans_horizon_v2_colab.ipynb`, `notebooks/titans_scaled_horizon_colab.ipynb` |
-| Appendix, width sweep across three widths | `notebooks/titans_scaled_horizon_colab.ipynb` |
-| Appendix, single-sequence probe (gate moves at most 0.033) | `experiments/titans_gate_on_input.py` |
-| Erasure past a load threshold, and per-unit localization | `experiments/titans_per_unit.py` |
-| Residual-attribution trap (zeroed-memory control) | `experiments/titans_ablation.py` |
+| **Table 1**: both learned controls across five corpora, five seeds | `experiments/titans_lr_horizon.py` (or `notebooks/titans_lr_horizon_colab.ipynb`) |
+| **Table 2**, Appendix D: width sweep at dim 64 / 384 / 512 | `experiments/worker.py`, which dispatches the same script across the (dim, seed, corpus) grid |
+| Section 3, model width: alpha 0.741 at dim 64 vs 0.227 at dim 384 on enwik8 | `notebooks/titans_horizon_v2_colab.ipynb`, `notebooks/titans_scaled_horizon_colab.ipynb` |
+| Appendix B, single-sequence probe (gate moves at most 0.033) | `experiments/titans_gate_on_input.py` |
+| Section 5 + **Table 3**: erasure threshold and per-unit localization | `experiments/titans_per_unit.py` |
+| Section 5, residual-attribution trap (zeroed-memory control) | `experiments/titans_ablation.py` |
+
+`experiments/titans_horizon_timeseries.py` is the earlier single-control version
+(forget gate only, one seed). It is kept for reference; the paper's numbers come
+from `titans_lr_horizon.py`.
 
 ## Notes
 

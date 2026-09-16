@@ -32,7 +32,7 @@ One invocation trains and measures every corpus in turn (ETTm1, ETTh1, and the
 two AR processes), writing `horizon_by_corpus.json`:
 
 ```bash
-python experiments/titans_horizon_timeseries.py --dim 384
+python experiments/titans_lr_horizon.py --dim 384
 ```
 
 Add the text corpus by pointing at the copy shipped inside `titans-pytorch`:
